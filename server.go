@@ -34,7 +34,7 @@ func loadServeConfig() serveConfig {
 		Port:         envOr("PORT", "8080"),
 		APIKey:       strings.TrimSpace(os.Getenv("PROXY_API_KEY")),
 		TokenFile:    envOr("TOKEN_FILE", "./data/anthropic-tokens.json"),
-		DefaultModel: envOr("DEFAULT_MODEL", "claude-sonnet-4-5-20250929"),
+		DefaultModel: envOr("DEFAULT_MODEL", "claude-opus-4-7"),
 	}
 	if d, err := time.ParseDuration(envOr("REQUEST_TIMEOUT", "300s")); err == nil {
 		cfg.RequestTimeout = d
@@ -122,10 +122,8 @@ func (s *server) models(w http.ResponseWriter, _ *http.Request) {
 	// name in /v1/chat/completions is what matters at request time.
 	models := []map[string]any{
 		{"id": "claude-opus-4-7", "object": "model", "created": 0, "owned_by": "anthropic"},
-		{"id": "claude-opus-4-5-20250929", "object": "model", "created": 0, "owned_by": "anthropic"},
 		{"id": "claude-sonnet-4-6", "object": "model", "created": 0, "owned_by": "anthropic"},
-		{"id": "claude-sonnet-4-5-20250929", "object": "model", "created": 0, "owned_by": "anthropic"},
-		{"id": "claude-haiku-4-5-20251001", "object": "model", "created": 0, "owned_by": "anthropic"},
+		{"id": "claude-haiku-4-5", "object": "model", "created": 0, "owned_by": "anthropic"},
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
