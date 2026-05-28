@@ -90,21 +90,44 @@ type responsesResponse struct {
 	Usage     responsesUsage   `json:"usage"`
 }
 
+// Note: Content/Annotations are NOT omitempty even when empty. LangChain JS's
+// Responses-API parser calls .map() on them unconditionally; sending null
+// raises "Cannot read properties of undefined (reading 'map')" client-side.
 type responsesItem struct {
-	ID        string                  `json:"id"`
-	Type      string                  `json:"type"` // "message" | "function_call"
-	Status    string                  `json:"status,omitempty"`
-	Role      string                  `json:"role,omitempty"`
-	Content   []responsesOutputPart   `json:"content,omitempty"`
-	CallID    string                  `json:"call_id,omitempty"`
-	Name      string                  `json:"name,omitempty"`
-	Arguments string                  `json:"arguments,omitempty"`
+	ID        string                `json:"id"`
+	Type      string                `json:"type"` // "message" | "function_call"
+	Status    string                `json:"status,omitempty"`
+	Role      string                `json:"role,omitempty"`
+	Content   []responsesOutputPart `json:"content"`
+	CallID    string                `json:"call_id,omitempty"`
+	Name      string                `json:"name,omitempty"`
+	Arguments string                `json:"arguments,omitempty"`
+}
+
+// MarshalJSON ensures Content emits `[]` (not null) on function_call items.
+func (it responsesItem) MarshalJSON() ([]byte, error) {
+	type alias responsesItem
+	a := alias(it)
+	if a.Content == nil {
+		a.Content = []responsesOutputPart{}
+	}
+	return json.Marshal(a)
 }
 
 type responsesOutputPart struct {
-	Type        string                 `json:"type"` // "output_text"
-	Text        string                 `json:"text"`
-	Annotations []any                  `json:"annotations,omitempty"`
+	Type        string `json:"type"` // "output_text"
+	Text        string `json:"text"`
+	Annotations []any  `json:"annotations"`
+}
+
+// MarshalJSON ensures Annotations emits `[]` instead of null.
+func (p responsesOutputPart) MarshalJSON() ([]byte, error) {
+	type alias responsesOutputPart
+	a := alias(p)
+	if a.Annotations == nil {
+		a.Annotations = []any{}
+	}
+	return json.Marshal(a)
 }
 
 type responsesUsage struct {
