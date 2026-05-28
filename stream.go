@@ -5,15 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	bs "github.com/rasimio/blueship/core"
 )
 
 // streamCompletion runs a streaming Anthropic call and emits OpenAI-format
-// SSE chunks: first an initial delta carrying {"role":"assistant"}, then one
-// chunk per text delta, then a terminal chunk with finish_reason set, then
-// the literal `data: [DONE]` line OpenAI clients expect.
+// SSE chunks: an initial delta with {"role":"assistant"}, then one chunk per
+// text delta, then one chunk per fully-assembled tool_use (with index, id,
+// name and full arguments), then a terminal chunk with finish_reason set,
+// then the literal `data: [DONE]` line OpenAI clients expect.
+//
+// Anthropic streams partial JSON for tool_use arguments but blueship only
+// surfaces tool_use once the block is complete (content_block_stop). We
+// forward that as a single OpenAI tool_calls delta carrying the full
+// arguments string — n8n and the OpenAI SDK accept this shape.
 func (s *server) streamCompletion(w http.ResponseWriter, r *http.Request, req bs.CompletionRequest) {
 	if s.stream == nil {
 		writeOpenAIError(w, http.StatusInternalServerError, "stream_unavailable", "provider does not support streaming")
@@ -23,7 +30,7 @@ func (s *server) streamCompletion(w http.ResponseWriter, r *http.Request, req bs
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no") // tell nginx/caddy not to buffer
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
 	flusher, _ := w.(http.Flusher)
@@ -32,12 +39,35 @@ func (s *server) streamCompletion(w http.ResponseWriter, r *http.Request, req bs
 
 	writeSSEChunk(w, flusher, id, created, req.Model, map[string]any{"role": "assistant"}, nil)
 
+	var toolCallIdx int64 = -1
+	var sawToolUse atomic.Bool
+
 	cb := &bs.StreamCallbacks{
 		OnText: func(delta string) {
 			if delta == "" {
 				return
 			}
 			writeSSEChunk(w, flusher, id, created, req.Model, map[string]any{"content": delta}, nil)
+		},
+		OnToolUse: func(useID, name string, input json.RawMessage) {
+			sawToolUse.Store(true)
+			args := string(input)
+			if args == "" || !json.Valid(input) {
+				args = "{}"
+			}
+			idx := atomic.AddInt64(&toolCallIdx, 1)
+			delta := map[string]any{
+				"tool_calls": []map[string]any{{
+					"index": int(idx),
+					"id":    useID,
+					"type":  "function",
+					"function": map[string]any{
+						"name":      name,
+						"arguments": args,
+					},
+				}},
+			}
+			writeSSEChunk(w, flusher, id, created, req.Model, delta, nil)
 		},
 	}
 
@@ -47,15 +77,17 @@ func (s *server) streamCompletion(w http.ResponseWriter, r *http.Request, req bs
 	resp, err := s.stream.StreamComplete(ctx, req, cb)
 	if err != nil {
 		s.logger.Error("upstream stream failed", "error", err)
-		// Best-effort: emit a final chunk carrying an error finish_reason. We
-		// can't switch back to JSON error mid-stream — the client already saw
-		// 200 + text/event-stream headers.
 		writeSSEChunk(w, flusher, id, created, req.Model, map[string]any{}, ptr("stop"))
 		writeSSEDone(w, flusher)
 		return
 	}
 
-	writeSSEChunk(w, flusher, id, created, req.Model, map[string]any{}, ptr(mapStopReason(resp.StopReason)))
+	finish := mapStopReason(resp.StopReason)
+	if sawToolUse.Load() && (finish == "stop" || finish == "") {
+		finish = "tool_calls"
+	}
+
+	writeSSEChunk(w, flusher, id, created, req.Model, map[string]any{}, ptr(finish))
 	writeSSEDone(w, flusher)
 }
 

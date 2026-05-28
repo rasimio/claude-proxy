@@ -1,67 +1,166 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	bs "github.com/rasimio/blueship/core"
 )
 
-// openaiChatRequest is a subset of the OpenAI Chat Completions schema that
-// covers what n8n's OpenAI Chat Model node actually sends. Fields we don't
-// translate (tools, tool_choice, response_format, …) are accepted and ignored
-// so that requests with extra keys still work — proxy must be permissive.
+// openaiChatRequest covers the OpenAI Chat Completions fields we translate:
+// system/user/assistant/tool messages, tools + tool_choice, response_format,
+// vision (image_url content parts), max_tokens, temperature, stream. Unknown
+// fields are accepted and ignored.
 type openaiChatRequest struct {
-	Model       string              `json:"model"`
-	Messages    []openaiChatMessage `json:"messages"`
-	MaxTokens   int                 `json:"max_tokens,omitempty"`
-	Temperature float64             `json:"temperature,omitempty"`
-	Stream      bool                `json:"stream,omitempty"`
+	Model          string                `json:"model"`
+	Messages       []openaiChatMessage   `json:"messages"`
+	MaxTokens      int                   `json:"max_tokens,omitempty"`
+	Temperature    float64               `json:"temperature,omitempty"`
+	Stream         bool                  `json:"stream,omitempty"`
+	Tools          []openaiTool          `json:"tools,omitempty"`
+	ToolChoice     json.RawMessage       `json:"tool_choice,omitempty"`
+	ResponseFormat *openaiResponseFormat `json:"response_format,omitempty"`
 }
 
 type openaiChatMessage struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"` // string OR []{type,text,…}
-	Name    string `json:"name,omitempty"`
+	Role       string           `json:"role"`
+	Content    json.RawMessage  `json:"content,omitempty"` // string OR array of parts OR null (assistant with tool_calls)
+	Name       string           `json:"name,omitempty"`
+	ToolCalls  []openaiToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
 
-// openaiToBlueship converts an OpenAI Chat Completions request into a
-// blueship CompletionRequest. system messages are concatenated into the
-// dedicated System field (Anthropic expects it separate from the message
-// turns); user/assistant turns are passed through as plain text; tool-role
-// messages get folded back into a user turn with a "[tool result]" prefix
-// because the OpenAI tool-call format does not round-trip cleanly into
-// Anthropic's tool_use/tool_result blocks without also translating the
-// preceding assistant tool_calls — out of scope for v1.
+type openaiTool struct {
+	Type     string         `json:"type"`
+	Function openaiFunction `json:"function"`
+}
+
+type openaiFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+type openaiToolCall struct {
+	ID       string             `json:"id"`
+	Type     string             `json:"type"`
+	Function openaiFunctionCall `json:"function"`
+}
+
+type openaiFunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type openaiResponseFormat struct {
+	Type       string          `json:"type"`
+	JSONSchema json.RawMessage `json:"json_schema,omitempty"`
+}
+
+type openaiContentPart struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	ImageURL *struct {
+		URL    string `json:"url"`
+		Detail string `json:"detail,omitempty"`
+	} `json:"image_url,omitempty"`
+}
+
+// openaiToBlueship converts an OpenAI request into blueship's CompletionRequest.
+// system messages concat into the System field. user/assistant turns produce
+// ContentBlock arrays so text + images + tool_use / tool_result coexist.
+// tool-role messages fold back into the prior assistant's tool_use as a user
+// turn carrying a tool_result block keyed by tool_call_id. response_format
+// is steered via an appended system instruction (Anthropic has no first-class
+// json_object mode but the model honours an explicit prompt).
 func openaiToBlueship(req openaiChatRequest, defaultModel string) (bs.CompletionRequest, error) {
 	var systemParts []string
 	messages := make([]bs.Message, 0, len(req.Messages))
 
 	for _, m := range req.Messages {
-		text := flattenContent(m.Content)
 		switch m.Role {
 		case "system", "developer":
-			if text != "" {
+			if text := flattenTextContent(m.Content); text != "" {
 				systemParts = append(systemParts, text)
 			}
+
 		case "user":
-			messages = append(messages, bs.Message{Role: "user", Content: text})
-		case "assistant":
-			if text == "" {
-				continue // skip empty assistant turns from prior tool_call rounds
+			blocks := openaiContentToBlocks(m.Content)
+			if len(blocks) == 0 {
+				continue
 			}
-			messages = append(messages, bs.Message{Role: "assistant", Content: text})
+			messages = append(messages, bs.Message{Role: "user", Content: blocks})
+
+		case "assistant":
+			blocks := openaiContentToBlocks(m.Content)
+			for _, tc := range m.ToolCalls {
+				args := json.RawMessage(tc.Function.Arguments)
+				if !json.Valid(args) || len(args) == 0 {
+					args = json.RawMessage("{}")
+				}
+				blocks = append(blocks, bs.ContentBlock{
+					Type:  "tool_use",
+					ID:    tc.ID,
+					Name:  tc.Function.Name,
+					Input: args,
+				})
+			}
+			if len(blocks) == 0 {
+				continue
+			}
+			messages = append(messages, bs.Message{Role: "assistant", Content: blocks})
+
 		case "tool", "function":
-			messages = append(messages, bs.Message{Role: "user", Content: "[tool result] " + text})
+			content := flattenTextContent(m.Content)
+			if content == "" {
+				content = " " // Anthropic rejects empty tool_result
+			}
+			toolUseID := m.ToolCallID
+			if toolUseID == "" {
+				toolUseID = m.Name // legacy function-role fallback
+			}
+			messages = append(messages, bs.Message{Role: "user", Content: []bs.ContentBlock{{
+				Type:      "tool_result",
+				ToolUseID: toolUseID,
+				Content:   content,
+			}}})
+
 		default:
-			// unknown role — pass as user
-			messages = append(messages, bs.Message{Role: "user", Content: text})
+			// Unknown role — treat as user text.
+			if text := flattenTextContent(m.Content); text != "" {
+				messages = append(messages, bs.Message{Role: "user", Content: text})
+			}
 		}
 	}
 
 	if len(messages) == 0 {
 		return bs.CompletionRequest{}, errors.New("no user/assistant messages provided")
+	}
+
+	if rf := req.ResponseFormat; rf != nil {
+		switch rf.Type {
+		case "json_object":
+			systemParts = append(systemParts, "Respond with a single valid JSON object only. No prose, no code fences, no commentary outside the JSON.")
+		case "json_schema":
+			if len(rf.JSONSchema) > 0 {
+				systemParts = append(systemParts, fmt.Sprintf("Respond with a single JSON value that strictly conforms to this schema. Output JSON only, no prose or code fences.\n\nSchema: %s", string(rf.JSONSchema)))
+			} else {
+				systemParts = append(systemParts, "Respond with a single valid JSON value only. No prose, no code fences.")
+			}
+		}
+	}
+
+	tools := openaiToolsToBlueship(req.Tools)
+	if shouldOmitTools(req.ToolChoice) {
+		tools = nil
+	}
+	if name := forcedToolName(req.ToolChoice); name != "" {
+		// Anthropic accepts force-tool only through its own tool_choice field which
+		// blueship's CompletionRequest doesn't expose. Best-effort: nudge via system.
+		systemParts = append(systemParts, "You MUST call the tool named `"+name+"`.")
 	}
 
 	model := strings.TrimSpace(req.Model)
@@ -78,37 +177,147 @@ func openaiToBlueship(req openaiChatRequest, defaultModel string) (bs.Completion
 		Model:       model,
 		System:      strings.Join(systemParts, "\n\n"),
 		Messages:    messages,
+		Tools:       tools,
 		MaxTokens:   maxTokens,
 		Temperature: req.Temperature,
 	}, nil
 }
 
-// flattenContent extracts plain text from OpenAI's flexible content schema.
-// A content field is either a string, or an array of parts each like
-// {"type":"text","text":"…"} (vision parts are dropped for v1).
-func flattenContent(c any) string {
-	switch v := c.(type) {
-	case nil:
-		return ""
-	case string:
-		return v
-	case []any:
-		var parts []string
-		for _, item := range v {
-			m, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			if t, _ := m["type"].(string); t == "text" {
-				if s, ok := m["text"].(string); ok {
-					parts = append(parts, s)
-				}
-			}
+func openaiToolsToBlueship(tools []openaiTool) []bs.ToolDefinition {
+	out := make([]bs.ToolDefinition, 0, len(tools))
+	for _, t := range tools {
+		if t.Type != "" && t.Type != "function" {
+			continue
 		}
-		return strings.Join(parts, "\n")
-	default:
+		schema := t.Function.Parameters
+		if len(schema) == 0 {
+			schema = json.RawMessage(`{"type":"object","properties":{}}`)
+		}
+		out = append(out, bs.ToolDefinition{
+			Name:        t.Function.Name,
+			Description: t.Function.Description,
+			InputSchema: schema,
+		})
+	}
+	return out
+}
+
+// shouldOmitTools returns true when tool_choice is the literal string "none".
+func shouldOmitTools(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s == "none"
+	}
+	return false
+}
+
+// forcedToolName extracts the function.name from a structured tool_choice
+// like {"type":"function","function":{"name":"x"}}. Empty when not forced.
+func forcedToolName(raw json.RawMessage) string {
+	if len(raw) == 0 {
 		return ""
 	}
+	var obj struct {
+		Type     string `json:"type"`
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil && obj.Type == "function" {
+		return obj.Function.Name
+	}
+	return ""
+}
+
+// openaiContentToBlocks parses an OpenAI content field into ContentBlocks.
+// content can be a JSON string (the simple case), a JSON array of parts
+// ({"type":"text",…} or {"type":"image_url",…}), or null.
+func openaiContentToBlocks(raw json.RawMessage) []bs.ContentBlock {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil
+	}
+
+	// Fast path: bare JSON string.
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			if s == "" {
+				return nil
+			}
+			return []bs.ContentBlock{{Type: "text", Text: s}}
+		}
+	}
+
+	// Array of parts.
+	var parts []openaiContentPart
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		// Last resort: maybe it's some other JSON value we can stringify.
+		return []bs.ContentBlock{{Type: "text", Text: string(raw)}}
+	}
+
+	blocks := make([]bs.ContentBlock, 0, len(parts))
+	for _, p := range parts {
+		switch p.Type {
+		case "text":
+			if p.Text != "" {
+				blocks = append(blocks, bs.ContentBlock{Type: "text", Text: p.Text})
+			}
+		case "image_url", "image":
+			if p.ImageURL == nil || p.ImageURL.URL == "" {
+				continue
+			}
+			if src := parseDataURL(p.ImageURL.URL); src != nil {
+				blocks = append(blocks, bs.ContentBlock{Type: "image", Source: src})
+			}
+			// http(s):// URLs silently dropped — blueship's ImageSource is
+			// base64-only. Senders should inline data:image/...;base64.
+		}
+	}
+	return blocks
+}
+
+// flattenTextContent collapses an OpenAI content field into a single text
+// string. Image parts are dropped. Used for system / tool messages where
+// blocks aren't meaningful.
+func flattenTextContent(raw json.RawMessage) string {
+	blocks := openaiContentToBlocks(raw)
+	if len(blocks) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(blocks))
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// parseDataURL parses data:[<media>];base64,<data> into an ImageSource.
+// Anthropic accepts base64 with a media_type; other data URL forms return nil.
+func parseDataURL(url string) *bs.ImageSource {
+	const dataPrefix = "data:"
+	if !strings.HasPrefix(url, dataPrefix) {
+		return nil
+	}
+	rest := url[len(dataPrefix):]
+	comma := strings.Index(rest, ",")
+	if comma == -1 {
+		return nil
+	}
+	meta, data := rest[:comma], rest[comma+1:]
+	if !strings.Contains(meta, "base64") {
+		return nil
+	}
+	media := strings.SplitN(meta, ";", 2)[0]
+	if media == "" {
+		media = "image/jpeg"
+	}
+	return &bs.ImageSource{Type: "base64", MediaType: media, Data: data}
 }
 
 // openaiChatResponse is the non-streaming response envelope.
@@ -128,8 +337,9 @@ type openaiChoice struct {
 }
 
 type openaiOutputMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	ToolCalls []openaiToolCall `json:"tool_calls,omitempty"`
 }
 
 type openaiUsage struct {
@@ -139,16 +349,48 @@ type openaiUsage struct {
 }
 
 func blueshipToOpenAI(resp *bs.CompletionResponse, model string) openaiChatResponse {
-	text := bs.ExtractText(resp.Content)
+	var textParts []string
+	var toolCalls []openaiToolCall
+	for _, b := range resp.Content {
+		switch b.Type {
+		case "text":
+			if b.Text != "" {
+				textParts = append(textParts, b.Text)
+			}
+		case "tool_use":
+			args := string(b.Input)
+			if args == "" || !json.Valid(b.Input) {
+				args = "{}"
+			}
+			toolCalls = append(toolCalls, openaiToolCall{
+				ID:   b.ID,
+				Type: "function",
+				Function: openaiFunctionCall{
+					Name:      b.Name,
+					Arguments: args,
+				},
+			})
+		}
+	}
+
+	finish := mapStopReason(resp.StopReason)
+	if len(toolCalls) > 0 && (finish == "stop" || finish == "") {
+		finish = "tool_calls"
+	}
+
 	return openaiChatResponse{
 		ID:      "chatcmpl-" + randomID(),
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
 		Model:   model,
 		Choices: []openaiChoice{{
-			Index:        0,
-			Message:      openaiOutputMessage{Role: "assistant", Content: text},
-			FinishReason: mapStopReason(resp.StopReason),
+			Index: 0,
+			Message: openaiOutputMessage{
+				Role:      "assistant",
+				Content:   strings.Join(textParts, ""),
+				ToolCalls: toolCalls,
+			},
+			FinishReason: finish,
 		}},
 		Usage: openaiUsage{
 			PromptTokens:     resp.Usage.InputTokens,
@@ -159,8 +401,8 @@ func blueshipToOpenAI(resp *bs.CompletionResponse, model string) openaiChatRespo
 }
 
 // mapStopReason translates Anthropic stop_reason values into OpenAI
-// finish_reason. n8n and most clients only branch on "stop"/"length" so
-// anything unexpected gets normalised to "stop".
+// finish_reason. tool_use → tool_calls; max_tokens → length; everything
+// else collapses to stop.
 func mapStopReason(r string) string {
 	switch r {
 	case "end_turn", "stop_sequence":
