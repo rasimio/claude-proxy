@@ -79,8 +79,17 @@ func runServe() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", srv.healthz)
+
+	// Register both /v1/<x> and /<x> — different OpenAI clients (n8n's
+	// LangChain ChatOpenAI in particular) construct URLs differently
+	// depending on whether the base URL the user typed already ends in /v1.
 	mux.HandleFunc("/v1/models", srv.requireAuth(srv.models))
+	mux.HandleFunc("/models", srv.requireAuth(srv.models))
 	mux.HandleFunc("/v1/chat/completions", srv.requireAuth(srv.chatCompletions))
+	mux.HandleFunc("/chat/completions", srv.requireAuth(srv.chatCompletions))
+
+	// Catch-all so unknown paths surface in logs instead of bare 404.
+	mux.HandleFunc("/", srv.notFound)
 
 	addr := cfg.Bind + ":" + cfg.Port
 	logger.Info("claude-proxy listening",
@@ -91,7 +100,7 @@ func runServe() {
 
 	httpSrv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           accessLog(logger, mux),
 		ReadHeaderTimeout: 15 * time.Second,
 	}
 	if err := httpSrv.ListenAndServe(); err != nil {
@@ -103,6 +112,48 @@ func runServe() {
 func (s *server) healthz(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+func (s *server) notFound(w http.ResponseWriter, r *http.Request) {
+	writeOpenAIError(w, http.StatusNotFound, "not_found",
+		"unknown path "+r.Method+" "+r.URL.Path+"; supported: /v1/chat/completions, /v1/models, /healthz")
+}
+
+// accessLog wraps the handler with a per-request log line so misrouted
+// clients (404s) leave a trail showing the exact path they hit.
+func accessLog(logger *slog.Logger, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusRecorder{ResponseWriter: w, status: 200}
+		h.ServeHTTP(sw, r)
+		logger.Info("http",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", sw.status,
+			"dur_ms", time.Since(start).Milliseconds(),
+			"ua", r.Header.Get("User-Agent"),
+		)
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if !s.wroteHeader {
+		s.status = code
+		s.wroteHeader = true
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func (s *server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
