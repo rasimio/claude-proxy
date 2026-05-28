@@ -143,13 +143,9 @@ func openaiToBlueship(req openaiChatRequest, defaultModel string) (bs.Completion
 	if rf := req.ResponseFormat; rf != nil {
 		switch rf.Type {
 		case "json_object":
-			systemParts = append(systemParts, "Respond with a single valid JSON object only. No prose, no code fences, no commentary outside the JSON.")
+			systemParts = append(systemParts, jsonModeInstruction(""))
 		case "json_schema":
-			if len(rf.JSONSchema) > 0 {
-				systemParts = append(systemParts, fmt.Sprintf("Respond with a single JSON value that strictly conforms to this schema. Output JSON only, no prose or code fences.\n\nSchema: %s", string(rf.JSONSchema)))
-			} else {
-				systemParts = append(systemParts, "Respond with a single valid JSON value only. No prose, no code fences.")
-			}
+			systemParts = append(systemParts, jsonModeInstruction(string(rf.JSONSchema)))
 		}
 	}
 
@@ -348,7 +344,7 @@ type openaiUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-func blueshipToOpenAI(resp *bs.CompletionResponse, model string) openaiChatResponse {
+func blueshipToOpenAI(resp *bs.CompletionResponse, model string, jsonMode bool) openaiChatResponse {
 	var textParts []string
 	var toolCalls []openaiToolCall
 	for _, b := range resp.Content {
@@ -378,6 +374,11 @@ func blueshipToOpenAI(resp *bs.CompletionResponse, model string) openaiChatRespo
 		finish = "tool_calls"
 	}
 
+	content := strings.Join(textParts, "")
+	if jsonMode {
+		content = stripJSONFences(content)
+	}
+
 	return openaiChatResponse{
 		ID:      "chatcmpl-" + randomID(),
 		Object:  "chat.completion",
@@ -387,7 +388,7 @@ func blueshipToOpenAI(resp *bs.CompletionResponse, model string) openaiChatRespo
 			Index: 0,
 			Message: openaiOutputMessage{
 				Role:      "assistant",
-				Content:   strings.Join(textParts, ""),
+				Content:   content,
 				ToolCalls: toolCalls,
 			},
 			FinishReason: finish,
@@ -398,6 +399,41 @@ func blueshipToOpenAI(resp *bs.CompletionResponse, model string) openaiChatRespo
 			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
 		},
 	}
+}
+
+// jsonModeInstruction builds the system suffix used to mimic OpenAI's
+// response_format. Anthropic has no first-class JSON mode and Claude likes
+// to wrap structured output in ```json fences even when told otherwise, so
+// the instruction is explicit about the prohibition and we also strip
+// fences from the response (see stripJSONFences) as a belt-and-suspenders
+// guarantee for downstream consumers.
+func jsonModeInstruction(schema string) string {
+	b := strings.Builder{}
+	b.WriteString("You MUST respond with a single raw JSON value. ")
+	b.WriteString("Do NOT wrap it in markdown code fences (no ``` or ```json). ")
+	b.WriteString("Do NOT add any prose, commentary, or explanation before or after the JSON. ")
+	b.WriteString("Your entire response must be valid JSON starting with `{` or `[`.")
+	if strings.TrimSpace(schema) != "" {
+		b.WriteString("\n\nThe JSON must conform to this schema:\n")
+		b.WriteString(schema)
+	}
+	return b.String()
+}
+
+// stripJSONFences removes a leading ```json (or ```) and a trailing ``` from
+// model output. No-op if no fence is present. Applied only when the request
+// asked for response_format JSON.
+func stripJSONFences(s string) string {
+	t := strings.TrimSpace(s)
+	if !strings.HasPrefix(t, "```") {
+		return s
+	}
+	t = strings.TrimPrefix(t, "```")
+	t = strings.TrimPrefix(t, "json")
+	t = strings.TrimPrefix(t, "JSON")
+	t = strings.TrimLeft(t, "\r\n")
+	t = strings.TrimSuffix(t, "```")
+	return strings.TrimSpace(t)
 }
 
 // mapStopReason translates Anthropic stop_reason values into OpenAI

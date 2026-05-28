@@ -178,7 +178,8 @@ func (s *server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, blueshipToOpenAI(resp, bsReq.Model))
+	jsonMode := req.ResponseFormat != nil && (req.ResponseFormat.Type == "json_object" || req.ResponseFormat.Type == "json_schema")
+	writeJSON(w, http.StatusOK, blueshipToOpenAI(resp, bsReq.Model, jsonMode))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
