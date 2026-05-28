@@ -87,6 +87,8 @@ func runServe() {
 	mux.HandleFunc("/models", srv.requireAuth(srv.models))
 	mux.HandleFunc("/v1/chat/completions", srv.requireAuth(srv.chatCompletions))
 	mux.HandleFunc("/chat/completions", srv.requireAuth(srv.chatCompletions))
+	mux.HandleFunc("/v1/responses", srv.requireAuth(srv.responses))
+	mux.HandleFunc("/responses", srv.requireAuth(srv.responses))
 
 	// Catch-all so unknown paths surface in logs instead of bare 404.
 	mux.HandleFunc("/", srv.notFound)
@@ -116,7 +118,7 @@ func (s *server) healthz(w http.ResponseWriter, _ *http.Request) {
 
 func (s *server) notFound(w http.ResponseWriter, r *http.Request) {
 	writeOpenAIError(w, http.StatusNotFound, "not_found",
-		"unknown path "+r.Method+" "+r.URL.Path+"; supported: /v1/chat/completions, /v1/models, /healthz")
+		"unknown path "+r.Method+" "+r.URL.Path+"; supported: /v1/chat/completions, /v1/responses, /v1/models, /healthz")
 }
 
 // accessLog wraps the handler with a per-request log line so misrouted
