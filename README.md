@@ -41,8 +41,9 @@ n8n / LangChain / cURL
 - **JSON mode** — `response_format: {type: json_object}` and
   `{type: json_schema}` translate into system instructions plus
   best-effort fence stripping on output
-- **Models** — `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`
-  (whichever the client requests; falls back to `DEFAULT_MODEL`)
+- **Models** — `claude-opus-4-7`, `claude-sonnet-5`,
+  `claude-sonnet-4-6`, `claude-haiku-4-5` (whichever the client requests;
+  falls back to `DEFAULT_MODEL`)
 - **Token rotation** — handled by the underlying blueship token store;
   the proxy survives Anthropic rotating refresh tokens
 - **Access log** — every request is logged with method, path, status,
@@ -177,8 +178,8 @@ workflows) or any other "OpenAI compatible" node:
      work, the proxy aliases the routes. Use whatever the node accepts.
 
 2. **In the node parameters**
-   - **Model name**: `claude-opus-4-7`, `claude-sonnet-4-6`, or
-     `claude-haiku-4-5`
+   - **Model name**: `claude-opus-4-7`, `claude-sonnet-5`,
+     `claude-sonnet-4-6`, or `claude-haiku-4-5`
    - **Temperature**, **Max tokens**, etc. work as usual
 
 3. **HTTPS** — out of the box claude-proxy serves plain HTTP. If n8n is
@@ -381,17 +382,18 @@ directly if running the binary).
 | `BIND` | `0.0.0.0` | no | Listen interface |
 | `HOST_PORT` | `8080` | no | docker-compose port mapping on the host |
 | `BIND_ADDR` | `0.0.0.0` | no | docker-compose bind interface on the host |
-| `BLUESHIP_REV` | `main` | no | git revision of blueship to clone in Docker build |
+| `BLUESHIP_REV` | `3f07ab03a7567f25d4b8ece943374d570f47ab44` | no | git revision of blueship to clone in Docker build |
 
 ---
 
 ## Models
 
-Three short names are exposed:
+Four short names are exposed:
 
 | Model | Use for |
 |---|---|
 | `claude-opus-4-7` | Smartest. Default. Best for complex reasoning, code, agents. |
+| `claude-sonnet-5` | Newest Sonnet. Strong agentic coding and tool-use balance. |
 | `claude-sonnet-4-6` | Balanced. Good for most n8n workflows. |
 | `claude-haiku-4-5` | Fastest / cheapest. Quick classifications, simple chats. |
 
@@ -472,8 +474,7 @@ ssh root@<host> 'cd /opt/claude-proxy && \
   docker compose up -d'
 ```
 
-To pin to a specific `blueship` revision (e.g. if `main` upstream
-changes in a way that breaks the build):
+To pin to a different `blueship` revision:
 
 ```bash
 # in .env

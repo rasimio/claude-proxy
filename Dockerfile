@@ -2,19 +2,20 @@
 #
 # Multi-stage build. The builder stage clones blueship as a sibling directory
 # so the `replace github.com/rasimio/blueship => ../blueship` directive in
-# go.mod resolves. BLUESHIP_REV pins the blueship revision (defaults to main);
-# override with `docker build --build-arg BLUESHIP_REV=<sha>` for reproducible
-# builds.
+# go.mod resolves. BLUESHIP_REV pins the blueship revision; override with
+# `docker build --build-arg BLUESHIP_REV=<sha>` for reproducible builds.
 
 FROM golang:1.26-alpine AS builder
 
 ARG BLUESHIP_REPO=https://github.com/rasimio/blueship.git
-ARG BLUESHIP_REV=main
+ARG BLUESHIP_REV=3f07ab03a7567f25d4b8ece943374d570f47ab44
 
 RUN apk add --no-cache git ca-certificates
 
 WORKDIR /src
-RUN git clone --depth 1 --branch ${BLUESHIP_REV} ${BLUESHIP_REPO} /src/blueship
+RUN git clone ${BLUESHIP_REPO} /src/blueship && \
+    cd /src/blueship && \
+    git checkout --detach ${BLUESHIP_REV}
 
 WORKDIR /src/claude-proxy
 COPY go.mod go.sum ./

@@ -175,6 +175,7 @@ func (s *server) models(w http.ResponseWriter, _ *http.Request) {
 	// name in /v1/chat/completions is what matters at request time.
 	models := []map[string]any{
 		{"id": "claude-opus-4-7", "object": "model", "created": 0, "owned_by": "anthropic"},
+		{"id": "claude-sonnet-5", "object": "model", "created": 0, "owned_by": "anthropic"},
 		{"id": "claude-sonnet-4-6", "object": "model", "created": 0, "owned_by": "anthropic"},
 		{"id": "claude-haiku-4-5", "object": "model", "created": 0, "owned_by": "anthropic"},
 	}

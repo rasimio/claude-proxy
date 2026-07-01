@@ -63,7 +63,7 @@ is small and well-defined. Code should reflect that.
 
 - Go 1.26
 - `github.com/rasimio/blueship` — pinned in Dockerfile via `BLUESHIP_REV`
-  build arg (defaults to `main`)
+  build arg
 - Pulls a lot of transitive deps from blueship (postgres, redis, otel,
   chromedp, …) that we don't use at runtime. They don't hurt — binary is
   ~10 MB after `-ldflags="-s -w"`. Don't bother pruning unless we hit a
@@ -101,7 +101,7 @@ is small and well-defined. Code should reflect that.
 | `POST /chat/completions` | Bearer | alias for clients that don't prepend `/v1` |
 | `POST /v1/responses` | Bearer | OpenAI Responses API (LangChain JS v1+, n8n) |
 | `POST /responses` | Bearer | alias |
-| `GET /v1/models` | Bearer | static list of three short-name models |
+| `GET /v1/models` | Bearer | static list of four short-name models |
 | `GET /models` | Bearer | alias |
 | `GET /healthz` | none | `200 ok` |
 | `*` | — | 404 with a helpful message listing supported paths |
