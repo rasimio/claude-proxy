@@ -135,6 +135,8 @@ func openaiToBlueship(req openaiChatRequest, defaultModel string) (bs.Completion
 		}
 	}
 
+	messages = normalizeToolPairing(messages)
+
 	if len(messages) == 0 {
 		return bs.CompletionRequest{}, errors.New("no user/assistant messages provided")
 	}
@@ -176,6 +178,144 @@ func openaiToBlueship(req openaiChatRequest, defaultModel string) (bs.Completion
 		MaxTokens:   maxTokens,
 		Temperature: req.Temperature,
 	}, nil
+}
+
+// normalizeToolPairing repairs the tool_use / tool_result contract the
+// Anthropic API enforces but the OpenAI wire format cannot express:
+//
+//  1. OpenAI allows only one tool_call_id per tool-role message, so a
+//     parallel tool_use turn arrives as SEVERAL consecutive tool-role
+//     messages. Each became its own user turn here, and Anthropic then
+//     rejects the request ("tool_use ids were found without tool_result
+//     blocks immediately after") because it requires ALL results for a
+//     turn in the single next user message. → merge consecutive user
+//     turns, tool_result blocks first.
+//  2. Клиентская обрезка истории (dialog budget) может оставить tool_use
+//     без результата или tool_result без вызова. → inject a synthetic
+//     "(tool result unavailable)" for missing ids; demote orphan
+//     tool_results to plain text so the info survives without a 400.
+func normalizeToolPairing(messages []bs.Message) []bs.Message {
+	blocksOf := func(m bs.Message) []bs.ContentBlock {
+		switch c := m.Content.(type) {
+		case []bs.ContentBlock:
+			return c
+		case string:
+			if c == "" {
+				return nil
+			}
+			return []bs.ContentBlock{{Type: "text", Text: c}}
+		default:
+			return nil
+		}
+	}
+
+	// Pass 1: merge consecutive same-role messages (user+user comes from
+	// split tool results; assistant+assistant is harmless to merge too).
+	merged := make([]bs.Message, 0, len(messages))
+	for _, m := range messages {
+		if n := len(merged); n > 0 && merged[n-1].Role == m.Role {
+			merged[n-1].Content = append(blocksOf(merged[n-1]), blocksOf(m)...)
+			continue
+		}
+		mm := m
+		mm.Content = blocksOf(m)
+		merged = append(merged, mm)
+	}
+
+	// Pass 2: within each user turn put tool_result blocks first (the API
+	// requires results before any other content in the message).
+	for i := range merged {
+		if merged[i].Role != "user" {
+			continue
+		}
+		blocks := merged[i].Content.([]bs.ContentBlock)
+		results := make([]bs.ContentBlock, 0, len(blocks))
+		rest := make([]bs.ContentBlock, 0, len(blocks))
+		for _, b := range blocks {
+			if b.Type == "tool_result" {
+				results = append(results, b)
+			} else {
+				rest = append(rest, b)
+			}
+		}
+		merged[i].Content = append(results, rest...)
+	}
+
+	// Pass 3: pair every assistant tool_use with a result in the next
+	// message; synthesize missing results, demote orphan results to text.
+	// Manual bound: the loop inserts synthetic turns into merged.
+	for i := 0; i < len(merged); i++ {
+		blocks := merged[i].Content.([]bs.ContentBlock)
+		if merged[i].Role == "assistant" {
+			pending := map[string]bool{}
+			for _, b := range blocks {
+				if b.Type == "tool_use" && b.ID != "" {
+					pending[b.ID] = true
+				}
+			}
+			if len(pending) == 0 {
+				continue
+			}
+			if i+1 < len(merged) && merged[i+1].Role == "user" {
+				next := merged[i+1].Content.([]bs.ContentBlock)
+				for _, b := range next {
+					if b.Type == "tool_result" {
+						delete(pending, b.ToolUseID)
+					}
+				}
+				if len(pending) > 0 {
+					synth := make([]bs.ContentBlock, 0, len(pending))
+					for id := range pending {
+						synth = append(synth, bs.ContentBlock{
+							Type: "tool_result", ToolUseID: id,
+							Content: "(tool result unavailable)",
+						})
+					}
+					merged[i+1].Content = append(synth, next...)
+				}
+			} else {
+				// tool_use is the last message or followed by assistant:
+				// insert a synthetic result turn to satisfy the contract.
+				synth := make([]bs.ContentBlock, 0, len(pending))
+				for id := range pending {
+					synth = append(synth, bs.ContentBlock{
+						Type: "tool_result", ToolUseID: id,
+						Content: "(tool result unavailable)",
+					})
+				}
+				merged = append(merged[:i+1], append([]bs.Message{{Role: "user", Content: synth}}, merged[i+1:]...)...)
+			}
+		}
+	}
+
+	// Pass 4: demote tool_results whose id has no matching tool_use in the
+	// immediately preceding assistant turn (budget-clipped history).
+	for i := range merged {
+		if merged[i].Role != "user" {
+			continue
+		}
+		valid := map[string]bool{}
+		if i > 0 && merged[i-1].Role == "assistant" {
+			for _, b := range merged[i-1].Content.([]bs.ContentBlock) {
+				if b.Type == "tool_use" && b.ID != "" {
+					valid[b.ID] = true
+				}
+			}
+		}
+		blocks := merged[i].Content.([]bs.ContentBlock)
+		out := make([]bs.ContentBlock, 0, len(blocks))
+		for _, b := range blocks {
+			if b.Type == "tool_result" && !valid[b.ToolUseID] {
+				text, _ := b.Content.(string)
+				out = append(out, bs.ContentBlock{Type: "text", Text: "[tool result] " + text})
+				continue
+			}
+			out = append(out, b)
+		}
+		merged[i].Content = out
+	}
+
+	return merged
 }
 
 func openaiToolsToBlueship(tools []openaiTool) []bs.ToolDefinition {
