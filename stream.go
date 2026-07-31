@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship"
 )
 
 // streamCompletion runs a streaming Anthropic call and emits OpenAI-format

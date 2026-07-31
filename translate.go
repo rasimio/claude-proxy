@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship"
 )
 
 // openaiChatRequest covers the OpenAI Chat Completions fields we translate:

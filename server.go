@@ -15,8 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rasimio/blueship"
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship"
 )
 
 type serveConfig struct {
@@ -66,7 +65,7 @@ func runServe() {
 	}
 
 	backoffs := []time.Duration{1 * time.Second, 2 * time.Second, 5 * time.Second}
-	provider := blueship.AnthropicOAuth("", cfg.TokenFile, cfg.RequestTimeout, backoffs, logger)
+	provider := bs.AnthropicOAuth("", cfg.TokenFile, cfg.RequestTimeout, backoffs, logger)
 	streamProvider, _ := provider.(bs.StreamCompletionProvider)
 
 	srv := &server{

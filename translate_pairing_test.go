@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship"
 )
 
 func chatReq(msgs string) openaiChatRequest {

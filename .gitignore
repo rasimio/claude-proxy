@@ -1,5 +1,6 @@
 .env
 data/
+/claude-proxy
 /tmp/
 *.tmp
 .DS_Store

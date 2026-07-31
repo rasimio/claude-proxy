@@ -8,7 +8,7 @@
 FROM golang:1.26-alpine AS builder
 
 ARG BLUESHIP_REPO=https://github.com/rasimio/blueship.git
-ARG BLUESHIP_REV=3f07ab03a7567f25d4b8ece943374d570f47ab44
+ARG BLUESHIP_REV=a35a334e6586ca86434d02224b65d92b019bae85
 
 RUN apk add --no-cache git ca-certificates
 
