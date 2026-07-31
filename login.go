@@ -20,8 +20,12 @@ import (
 // Anthropic CLI; mirrored here so the login flow has no internal-package
 // dependency on blueship.
 const (
-	loginAuthURL     = "https://claude.ai/oauth/authorize"
-	loginTokenURL    = "https://console.anthropic.com/v1/oauth/token"
+	loginAuthURL = "https://claude.ai/oauth/authorize"
+	// console.anthropic.com stopped serving this path on 2026-07-31 — it
+	// answers 429 (plain client) or 404 (claude-cli User-Agent) for every
+	// grant type. The authorize URL and redirect_uri below were unaffected;
+	// only the token exchange moved.
+	loginTokenURL    = "https://claude.ai/v1/oauth/token"
 	loginClientID    = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	loginRedirectURI = "https://console.anthropic.com/oauth/code/callback"
 	loginScopes      = "org:create_api_key user:profile user:inference"
