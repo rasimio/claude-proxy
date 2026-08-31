@@ -92,6 +92,9 @@ docker compose logs -f claude-proxy
 curl -s http://localhost:8080/healthz
 # → ok
 
+curl -s http://localhost:8080/readyz | jq .
+# → {"status":"ok","access_token_expires_in_s":28740,"last_refresh":"..."}
+
 curl -s -H "Authorization: Bearer $PROXY_API_KEY" \
   http://localhost:8080/v1/models | jq .
 ```
@@ -554,14 +557,44 @@ requires at least one user or assistant turn.
 
 ### `anthropic API status 401`
 
-Your OAuth token expired and the refresh failed. Most likely your
-Claude subscription session ended (Anthropic invalidates refresh
-tokens when you sign out, change password, or after long inactivity).
-Re-run:
+A single one of these is normal and self-healing: the proxy treats a 401
+as "this access token was retired early", drops it, refreshes, and retries
+the request once. You will see `access token rejected upstream, forcing
+refresh` in the log and the client gets its answer.
+
+A *sustained* 401 means the refresh itself is failing. Ask `/readyz`:
+
 ```bash
-docker compose run --rm claude-proxy login
-docker compose restart claude-proxy
+curl -s http://localhost:8080/readyz | jq .
 ```
+
+- `{"status":"refresh_rejected"}` — the refresh token is dead. Anthropic
+  retires it when you sign out, change your password, after long
+  inactivity, or when **something else refreshed the same token** (see
+  "Authorization keeps dropping" below). Only a new login fixes it:
+  ```bash
+  docker compose run --rm claude-proxy login
+  docker compose restart claude-proxy
+  ```
+- `{"status":"degraded"}` or `{"status":"stale"}` — the OAuth endpoint is
+  failing, not your token. The proxy keeps retrying every 5 minutes; check
+  the log for the underlying error.
+
+### Authorization keeps dropping
+
+Almost always two processes sharing one refresh token. Anthropic's refresh
+tokens are **single-use** — every refresh mints a new one and kills the old
+— so a second consumer permanently breaks the chain for the first.
+
+Check that only one thing is using this token file:
+
+- no copy of `anthropic-tokens.json` on another host or in another container
+- the local `claude` CLI on your laptop logged in separately (it does not
+  share this file, and must not be pointed at it)
+- only one `claude-proxy` (or blueship agent) started against this `./data`
+
+The proxy renews the token 15 minutes ahead of expiry on a 5-minute tick, so
+if the chain is intact you should never see auth drop between logins.
 
 ### `anthropic API status 429` / `overloaded`
 
@@ -577,6 +610,12 @@ docker-compose volume mount actually wrote to it:
 ls -la ./data/
 cat ./data/anthropic-tokens.json | jq .
 ```
+
+`expires_at` should be a future unix timestamp and should move forward on
+its own every few hours as the background refresher rotates the pair. A
+`anthropic-tokens.json.prev` sits alongside it holding the previous pair —
+that is a manual escape hatch for inspection, not something the proxy ever
+falls back to on its own.
 
 ---
 

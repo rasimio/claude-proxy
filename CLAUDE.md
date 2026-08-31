@@ -81,10 +81,12 @@ is small and well-defined. Code should reflect that.
 5. CLI exchanges `code + code_verifier` → `{access_token, refresh_token,
    expires_at}`, writes JSON to `./data/anthropic-tokens.json` (matches the
    on-disk format `blueship.anthropicoauth.TokenData` expects).
-6. At `serve` time, `blueship.AnthropicOAuth(refreshToken="", tokenFile,
-   …)` constructs a `TokenStore` that loads the file, auto-refreshes the
-   access token before it expires, and rotates the refresh token when
-   Anthropic returns a new one.
+6. At `serve` time, `blueship.AnthropicOAuthWithTokens(refreshToken="",
+   tokenFile, …)` constructs a `TokenStore` that loads the file,
+   auto-refreshes the access token before it expires, and rotates the
+   refresh token when Anthropic returns a new one. It returns the store
+   alongside the provider so `server.refreshTokens` can drive rotation off
+   the request path — see **Token rotation** below.
 7. Each request to `api.anthropic.com/v1/messages` carries
    `Authorization: Bearer <access_token>` plus
    `anthropic-beta: oauth-2025-04-20`. blueship's `anthropic.Provider`
@@ -92,6 +94,47 @@ is small and well-defined. Code should reflect that.
    official CLI for Claude.` — Anthropic rejects OAuth-authed inference
    requests without it. **Do not strip this** even if it bleeds into
    responses.
+
+## Token rotation
+
+The access token lives ~8 h and the refresh token is **single-use** —
+Anthropic mints a new one on every exchange and retires the old one
+immediately. Three things keep that from turning into "authorization keeps
+dropping":
+
+1. **Ahead-of-time refresh.** `server.refreshTokens` ticks every 5 min and
+   renews anything expiring within 15 min. Rotation therefore never lands on
+   a client request: nobody pays the refresh latency, and a refresh that
+   fails transiently has two more ticks (and 15 min of slack) to recover
+   before the request path would even notice.
+2. **Retry with a fast path out.** `TokenStore.refreshLocked` retries
+   1 s / 2 s / 5 s on 5xx and network errors, but returns
+   `ErrRefreshRejected` immediately on `invalid_grant` or 401. A rejected
+   refresh token is terminal — retrying only delays you finding out.
+3. **Forced refresh on upstream 401.** Expiry is not the only way an access
+   token dies; refreshing the same pair elsewhere retires it, as does
+   revoking the session. `anthropic.Provider` turns a 401 into
+   `TokenSource.Invalidate()` plus exactly one retry. Without this the store
+   kept serving a token it believed valid until its nominal expiry and
+   **every request 401'd for up to 8 hours with no self-recovery** — this
+   was the actual cause of the "auth keeps falling off" reports.
+
+The invariant underneath all of it: **one token file, one writing process.**
+Because rotation is single-use, a second consumer of the same refresh token
+(a local `claude` CLI, a second container, a copy of `tokens.json` carried to
+another host, a blueship agent pointed at the same file) breaks the chain for
+good. `reloadFromDiskLocked` recovers only the narrow case of two processes
+on the same host sharing the same file.
+
+`writeTokenFile` keeps the superseded pair as `<path>.prev`. That is a manual
+escape hatch for an operator, **not** an automatic fallback — a rotated-away
+refresh token is usually dead, and silently retrying it would only mask the
+need to re-login.
+
+When the chain does break there is nothing to do but
+`claude-proxy login` again. `/readyz` reports `refresh_rejected` and the log
+says so in words; the compose healthcheck goes red but nothing restarts,
+because a bounce cannot fix it.
 
 ## Routes
 
@@ -103,7 +146,8 @@ is small and well-defined. Code should reflect that.
 | `POST /responses` | Bearer | alias |
 | `GET /v1/models` | Bearer | static list of four short-name models |
 | `GET /models` | Bearer | alias |
-| `GET /healthz` | none | `200 ok` |
+| `GET /healthz` | none | liveness: `200 ok`, unconditionally |
+| `GET /readyz` | none | token health: `200` ok/degraded, `503` no_tokens/refresh_rejected/stale |
 | `*` | — | 404 with a helpful message listing supported paths |
 
 `accessLog` middleware logs `method`, `path`, `status`, `dur_ms`, `ua` on
@@ -124,7 +168,8 @@ ssh root@188.166.99.177 'cd /opt/claude-proxy && git pull && \
 ssh root@188.166.99.177 'cd /opt/claude-proxy && docker compose logs -f claude-proxy'
 
 # health from outside
-curl -s http://188.166.99.177:8080/healthz
+curl -s http://188.166.99.177:8080/healthz   # process up?
+curl -s http://188.166.99.177:8080/readyz    # OAuth pair still good?
 ```
 
 CI is not set up. Push to main + ssh + rebuild is the workflow. Set up GH
@@ -160,6 +205,24 @@ Actions only if deploys start being frequent enough to matter.
 - **Token rotation is concurrency-safe** because blueship's `TokenStore`
   serializes refresh with a mutex and reloads from disk on a rotation
   race. We don't need our own locking around it.
+- **A cached access token used to outlive its own validity.** The store
+  handed out the same bearer until `expires_at` no matter how many 401s it
+  drew, so an early-retired token meant hours of dead requests that fixed
+  themselves only at expiry. Fixed by `Invalidate()` + one retry on 401.
+  If you ever see a 401 storm again, check that path first.
+- **Sharing one refresh token across two processes kills it permanently.**
+  Single-use rotation means the second consumer's copy is already invalid.
+  Don't copy `tokens.json` between hosts; log the local `claude` CLI in
+  separately.
+- **`/healthz` is not a token check.** It returns `200 ok` while the OAuth
+  chain is stone dead. `/readyz` is the one that knows.
+- **A stale `BLUESHIP_REV` re-introduces the dead token host.** `.env.example`
+  shipped `3f07ab03` long after that revision's refresh endpoint
+  (`console.anthropic.com`) went away, so any `.env` copied from it built a
+  proxy that logged itself out every access-token lifetime — with a refresh
+  error that looks like rate limiting. If auth drops on a schedule, check
+  `grep BLUESHIP_REV .env` on the box **before** reading any of the code
+  above. The Dockerfile default is the known-good one; unset beats stale.
 
 ## Env vars (serve)
 

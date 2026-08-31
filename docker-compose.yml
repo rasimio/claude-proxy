@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        BLUESHIP_REV: ${BLUESHIP_REV:-a35a334e6586ca86434d02224b65d92b019bae85}
+        BLUESHIP_REV: ${BLUESHIP_REV:-7050adb8f9c6f8140e13cac4a8f4841d758dceb1}
     image: claude-proxy:latest
     container_name: claude-proxy
     restart: unless-stopped
@@ -16,8 +16,14 @@ services:
       TOKEN_FILE: /data/anthropic-tokens.json
     volumes:
       - ./data:/data
+    # /readyz, not /healthz: the process staying up says nothing about whether
+    # the OAuth pair is still good. This goes red when the refresh chain breaks,
+    # which is the failure that otherwise only shows up as client-side 502s.
+    # Nothing restarts on it — a dead refresh token needs an interactive login,
+    # not a bounce — it is there so `docker compose ps` tells the truth.
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 10s

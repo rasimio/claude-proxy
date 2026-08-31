@@ -46,10 +46,20 @@ func loadServeConfig() serveConfig {
 type server struct {
 	provider     bs.CompletionProvider
 	stream       bs.StreamCompletionProvider // may be nil
+	tokens       *bs.AnthropicTokenStore
 	apiKey       string
 	defaultModel string
 	logger       *slog.Logger
 }
+
+// Token refresh cadence. The OAuth access token lives ~8 h. Renewing 15 min
+// ahead of expiry on a 5-min tick keeps rotation off the request path
+// entirely: a refresh that fails transiently gets two more ticks before the
+// token the request path would settle for (60 s of slack) even goes stale.
+const (
+	tokenRefreshInterval = 5 * time.Minute
+	tokenRefreshLead     = 15 * time.Minute
+)
 
 func runServe() {
 	cfg := loadServeConfig()
@@ -65,19 +75,22 @@ func runServe() {
 	}
 
 	backoffs := []time.Duration{1 * time.Second, 2 * time.Second, 5 * time.Second}
-	provider := bs.AnthropicOAuth("", cfg.TokenFile, cfg.RequestTimeout, backoffs, logger)
+	provider, tokens := bs.AnthropicOAuthWithTokens("", cfg.TokenFile, cfg.RequestTimeout, backoffs, logger)
 	streamProvider, _ := provider.(bs.StreamCompletionProvider)
 
 	srv := &server{
 		provider:     provider,
 		stream:       streamProvider,
+		tokens:       tokens,
 		apiKey:       cfg.APIKey,
 		defaultModel: cfg.DefaultModel,
 		logger:       logger,
 	}
+	go srv.refreshTokens(context.Background())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", srv.healthz)
+	mux.HandleFunc("/readyz", srv.readyz)
 
 	// Register both /v1/<x> and /<x> — different OpenAI clients (n8n's
 	// LangChain ChatOpenAI in particular) construct URLs differently
@@ -115,9 +128,89 @@ func (s *server) healthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
+// refreshTokens renews the OAuth pair ahead of expiry, forever.
+//
+// Without it the token only ever rotates on the first request that finds it
+// stale — so that request pays the refresh latency, and if the OAuth endpoint
+// is having a bad minute it eats the failure too, surfacing in the access log
+// as a 502 that has nothing to do with what the client asked for. On a tick
+// the same failure is just retried 5 minutes later, with hours of slack left.
+func (s *server) refreshTokens(ctx context.Context) {
+	tick := time.NewTicker(tokenRefreshInterval)
+	defer tick.Stop()
+
+	for {
+		// Run once up front: a token file left stale by a long shutdown should
+		// be caught at boot, not by the first client through the door.
+		if err := s.tokens.EnsureFresh(tokenRefreshLead); err != nil {
+			st := s.tokens.Status()
+			if st.Rejected {
+				// Terminal — the refresh chain is broken and no amount of
+				// ticking re-mints it. Say the fix out loud; /readyz goes red.
+				s.logger.Error("oauth refresh token rejected — run `claude-proxy login` to re-authorize",
+					"error", err)
+			} else {
+				s.logger.Error("oauth token refresh failed, will retry", "error", err)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// readyz reports whether the proxy can actually reach Anthropic — that is,
+// whether the OAuth pair is alive. /healthz stays a plain liveness probe (the
+// process is up and serving); this is the one that goes red when the refresh
+// chain breaks, the failure that used to stay invisible until a client
+// complained.
+//
+// Deliberately terse and unauthenticated, like /healthz: it carries no token
+// material and no upstream error text, only a status and a fixed hint. The
+// full error is in the log, which is where you were going to look anyway.
+func (s *server) readyz(w http.ResponseWriter, _ *http.Request) {
+	st := s.tokens.Status()
+	status, hint, code := readyState(st, time.Now())
+
+	body := map[string]any{"status": status}
+	if hint != "" {
+		body["hint"] = hint
+	}
+	if !st.ExpiresAt.IsZero() {
+		body["access_token_expires_in_s"] = int64(st.ExpiresAt.Sub(time.Now()).Seconds())
+	}
+	if !st.LastRefresh.IsZero() {
+		body["last_refresh"] = st.LastRefresh.UTC().Format(time.RFC3339)
+	}
+	writeJSON(w, code, body)
+}
+
+// readyState maps token health onto a probe verdict. Split out from the
+// handler because the interesting part is which failures are worth going red
+// over — a failing refresh on a token that is still valid is not one of them.
+func readyState(st bs.AnthropicTokenStatus, now time.Time) (status, hint string, code int) {
+	switch {
+	case !st.Configured:
+		return "no_tokens", "run `claude-proxy login`", http.StatusServiceUnavailable
+	case st.Rejected:
+		return "refresh_rejected", "refresh token is dead — run `claude-proxy login`", http.StatusServiceUnavailable
+	case st.LastError != "" && !st.ExpiresAt.After(now):
+		return "stale", "refresh failing and the access token has expired — check the log", http.StatusServiceUnavailable
+	case st.LastError != "":
+		// Refresh is failing but the current access token still works, so the
+		// proxy is serving fine and a red probe here would be a false alarm.
+		return "degraded", "last refresh failed; still serving on the current token", http.StatusOK
+	default:
+		return "ok", "", http.StatusOK
+	}
+}
+
 func (s *server) notFound(w http.ResponseWriter, r *http.Request) {
 	writeOpenAIError(w, http.StatusNotFound, "not_found",
-		"unknown path "+r.Method+" "+r.URL.Path+"; supported: /v1/chat/completions, /v1/responses, /v1/models, /healthz")
+		"unknown path "+r.Method+" "+r.URL.Path+"; supported: /v1/chat/completions, /v1/responses, /v1/models, /healthz, /readyz")
 }
 
 // accessLog wraps the handler with a per-request log line so misrouted
