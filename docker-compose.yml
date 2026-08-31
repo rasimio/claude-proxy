@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        BLUESHIP_REV: ${BLUESHIP_REV:-7050adb8f9c6f8140e13cac4a8f4841d758dceb1}
+        BLUESHIP_REV: ${BLUESHIP_REV:-2779acdb62c240f9953cb108d21ff9a636b7c1e6}
     image: claude-proxy:latest
     container_name: claude-proxy
     restart: unless-stopped
