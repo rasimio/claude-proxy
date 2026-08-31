@@ -45,6 +45,13 @@ type responsesRequest struct {
 	Text *struct {
 		Format *openaiResponseFormat `json:"format,omitempty"`
 	} `json:"text,omitempty"`
+
+	// The Responses API nests effort under "reasoning"; clients carried over
+	// from Chat Completions still send the flat spelling. Accept both.
+	Reasoning *struct {
+		Effort string `json:"effort,omitempty"`
+	} `json:"reasoning,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // responsesInputItem covers the item shapes we translate:
@@ -81,13 +88,13 @@ type responsesTool struct {
 // --- Response shape ---
 
 type responsesResponse struct {
-	ID        string           `json:"id"`
-	Object    string           `json:"object"`
-	CreatedAt int64            `json:"created_at"`
-	Status    string           `json:"status"`
-	Model     string           `json:"model"`
-	Output    []responsesItem  `json:"output"`
-	Usage     responsesUsage   `json:"usage"`
+	ID        string          `json:"id"`
+	Object    string          `json:"object"`
+	CreatedAt int64           `json:"created_at"`
+	Status    string          `json:"status"`
+	Model     string          `json:"model"`
+	Output    []responsesItem `json:"output"`
+	Usage     responsesUsage  `json:"usage"`
 }
 
 // Note: Content/Annotations are NOT omitempty even when empty. LangChain JS's
@@ -287,13 +294,21 @@ func responsesToBlueship(req responsesRequest, defaultModel string) (bs.Completi
 		maxTokens = 4096
 	}
 
+	rawEffort := req.ReasoningEffort
+	if req.Reasoning != nil && req.Reasoning.Effort != "" {
+		rawEffort = req.Reasoning.Effort
+	}
+	effort, thinkingMode := effortConfig(rawEffort)
+
 	return bs.CompletionRequest{
-		Model:       model,
-		System:      strings.Join(systemParts, "\n\n"),
-		Messages:    messages,
-		Tools:       tools,
-		MaxTokens:   maxTokens,
-		Temperature: req.Temperature,
+		Model:        model,
+		System:       strings.Join(systemParts, "\n\n"),
+		Messages:     messages,
+		Tools:        tools,
+		MaxTokens:    maxTokens,
+		Temperature:  req.Temperature,
+		Effort:       effort,
+		ThinkingMode: thinkingMode,
 	}, jsonMode, nil
 }
 

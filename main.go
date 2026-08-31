@@ -13,7 +13,7 @@
 //	BIND            (default "0.0.0.0")
 //	PROXY_API_KEY   (required) — n8n sends Authorization: Bearer <this>
 //	TOKEN_FILE      (default "./data/anthropic-tokens.json")
-//	DEFAULT_MODEL   (default "claude-sonnet-4-5-20250929")
+//	DEFAULT_MODEL   (default "claude-opus-5")
 //	REQUEST_TIMEOUT (default "300s") — upstream Anthropic call timeout
 package main
 

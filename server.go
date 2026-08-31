@@ -33,7 +33,7 @@ func loadServeConfig() serveConfig {
 		Port:         envOr("PORT", "8080"),
 		APIKey:       strings.TrimSpace(os.Getenv("PROXY_API_KEY")),
 		TokenFile:    envOr("TOKEN_FILE", "./data/anthropic-tokens.json"),
-		DefaultModel: envOr("DEFAULT_MODEL", "claude-opus-4-7"),
+		DefaultModel: envOr("DEFAULT_MODEL", "claude-opus-5"),
 	}
 	if d, err := time.ParseDuration(envOr("REQUEST_TIMEOUT", "300s")); err == nil {
 		cfg.RequestTimeout = d
@@ -264,8 +264,13 @@ func (s *server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 
 func (s *server) models(w http.ResponseWriter, _ *http.Request) {
 	// A small, fixed set. n8n only needs *something* to list; the actual model
-	// name in /v1/chat/completions is what matters at request time.
+	// name in /v1/chat/completions is what matters at request time and is
+	// passed straight through — a model missing from this list still works.
+	// Keep it current anyway: a stale list is how a new model stays invisible
+	// in every client dropdown long after it works fine.
 	models := []map[string]any{
+		{"id": "claude-opus-5", "object": "model", "created": 0, "owned_by": "anthropic"},
+		{"id": "claude-opus-4-8", "object": "model", "created": 0, "owned_by": "anthropic"},
 		{"id": "claude-opus-4-7", "object": "model", "created": 0, "owned_by": "anthropic"},
 		{"id": "claude-sonnet-5", "object": "model", "created": 0, "owned_by": "anthropic"},
 		{"id": "claude-sonnet-4-6", "object": "model", "created": 0, "owned_by": "anthropic"},

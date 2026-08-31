@@ -140,9 +140,9 @@ because a bounce cannot fix it.
 
 | Path | Auth | Notes |
 |---|---|---|
-| `POST /v1/chat/completions` | Bearer | OpenAI Chat Completions (legacy SDKs, LangChain JS v0.x, Vercel AI SDK) |
+| `POST /v1/chat/completions` | Bearer | OpenAI Chat Completions (legacy SDKs, LangChain JS v0.x, Vercel AI SDK); `reasoning_effort` accepted |
 | `POST /chat/completions` | Bearer | alias for clients that don't prepend `/v1` |
-| `POST /v1/responses` | Bearer | OpenAI Responses API (LangChain JS v1+, n8n) |
+| `POST /v1/responses` | Bearer | OpenAI Responses API (LangChain JS v1+, n8n); `reasoning.effort` or `reasoning_effort` |
 | `POST /responses` | Bearer | alias |
 | `GET /v1/models` | Bearer | static list of four short-name models |
 | `GET /models` | Bearer | alias |
@@ -208,6 +208,17 @@ Actions only if deploys start being frequent enough to matter.
   prompt forbids it. `response_format` non-streaming path runs the output
   through `stripJSONFences` as a safety net. Streaming JSON mode does
   not strip (would require buffering the whole stream); document that.
+- **The `/v1/models` list is cosmetic and goes stale silently.** It is a
+  hardcoded array in `server.go`; the `model` field of a request is passed
+  straight through, so a model absent from the list still works. Opus 5
+  answered fine for weeks while every client dropdown insisted it did not
+  exist. Add new models there when they ship.
+- **Effort without a thinking mode means different things per model.** Send no
+  thinking block and Opus 5 still reasons (on by default) while Opus 4.7/4.8
+  do not — the same request changes meaning with the model name. `effortConfig`
+  therefore pairs every effort with `ThinkingMode: "adaptive"`. Requests that
+  ask for no effort keep sending neither field, so existing callers' cost and
+  latency don't move.
 - **`tool_choice: "required"` and force-specific tool** are not
   first-class. blueship's `CompletionRequest` doesn't expose
   `tool_choice`. We nudge via an injected system instruction — works
@@ -241,7 +252,7 @@ Actions only if deploys start being frequent enough to matter.
 |---|---|---|
 | `PROXY_API_KEY` | — required — | Bearer token clients must send |
 | `TOKEN_FILE` | `./data/anthropic-tokens.json` | path to OAuth tokens |
-| `DEFAULT_MODEL` | `claude-opus-4-7` | used when client omits `model` |
+| `DEFAULT_MODEL` | `claude-opus-5` | used when client omits `model` |
 | `REQUEST_TIMEOUT` | `300s` | upstream timeout for non-streaming |
 | `PORT` | `8080` | listen port |
 | `BIND` | `0.0.0.0` | listen interface |

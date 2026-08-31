@@ -379,7 +379,7 @@ directly if running the binary).
 |---|---|---|---|
 | `PROXY_API_KEY` | — | yes | Bearer token clients must send |
 | `TOKEN_FILE` | `./data/anthropic-tokens.json` | no | Where login writes / serve reads OAuth tokens |
-| `DEFAULT_MODEL` | `claude-opus-4-7` | no | Used when request omits `model` |
+| `DEFAULT_MODEL` | `claude-opus-5` | no | Used when request omits `model` |
 | `REQUEST_TIMEOUT` | `300s` | no | Per-request upstream timeout (non-streaming) |
 | `PORT` | `8080` | no | Listen port |
 | `BIND` | `0.0.0.0` | no | Listen interface |
@@ -395,10 +395,45 @@ Four short names are exposed:
 
 | Model | Use for |
 |---|---|
-| `claude-opus-4-7` | Smartest. Default. Best for complex reasoning, code, agents. |
+| `claude-opus-5` | Smartest. Default. Best for complex reasoning, code, agents. |
+| `claude-opus-4-8` | Previous Opus. Still strong; thinking is off unless asked. |
+| `claude-opus-4-7` | Older Opus. |
 | `claude-sonnet-5` | Newest Sonnet. Strong agentic coding and tool-use balance. |
 | `claude-sonnet-4-6` | Balanced. Good for most n8n workflows. |
 | `claude-haiku-4-5` | Fastest / cheapest. Quick classifications, simple chats. |
+
+The list `/v1/models` returns is a fixed set for client dropdowns. The `model`
+field of a request is passed straight through, so any current Anthropic model
+id works whether or not it appears above.
+
+### Reasoning effort
+
+How hard Claude thinks before answering. Levels, cheapest first:
+`low`, `medium`, `high` (the API default), `xhigh`, `max`.
+
+```bash
+# Chat Completions
+curl -s http://<host>:8080/v1/chat/completions \
+  -H "Authorization: Bearer $PROXY_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"claude-opus-5","reasoning_effort":"max",
+       "messages":[{"role":"user","content":"..."}]}'
+
+# Responses API — nested form, or the flat reasoning_effort above
+curl -s http://<host>:8080/v1/responses \
+  -H "Authorization: Bearer $PROXY_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"claude-opus-5","reasoning":{"effort":"max"},"input":"..."}'
+```
+
+`xhigh` is the sweet spot for coding and agentic work; `max` is for when
+correctness matters more than the bill; `low` suits subagents and simple
+classification. OpenAI's `minimal` is accepted and folded into `low`.
+
+Asking for effort also turns on adaptive thinking, because effort alone means
+different things per model — Opus 5 reasons by default, Opus 4.7/4.8 do not.
+Omit the field entirely and nothing changes from before: no thinking block is
+sent and each model keeps its own default. Haiku rejects effort outright, so
+it is dropped for that family rather than failing the request. Reasoning is
+never echoed to the client on either endpoint.
 
 Anthropic accepts these short names and date-suffixed forms
 (`claude-opus-4-7-20…`) interchangeably. The proxy passes whatever you

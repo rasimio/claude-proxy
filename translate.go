@@ -22,6 +22,10 @@ type openaiChatRequest struct {
 	Tools          []openaiTool          `json:"tools,omitempty"`
 	ToolChoice     json.RawMessage       `json:"tool_choice,omitempty"`
 	ResponseFormat *openaiResponseFormat `json:"response_format,omitempty"`
+
+	// OpenAI's own name for the knob, so a client that already speaks
+	// reasoning_effort needs no special-casing to drive Claude's.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type openaiChatMessage struct {
@@ -75,6 +79,39 @@ type openaiContentPart struct {
 // turn carrying a tool_result block keyed by tool_call_id. response_format
 // is steered via an appended system instruction (Anthropic has no first-class
 // json_object mode but the model honours an explicit prompt).
+// effortConfig maps a client's reasoning-effort string onto the two fields
+// Anthropic needs: output_config.effort, and a thinking mode to go with it.
+//
+// OpenAI's vocabulary starts at "minimal", which has no Anthropic equivalent —
+// it folds into "low" rather than erroring, so a client tuned for OpenAI still
+// lands on the cheap end of the range. Anything unrecognized yields "" and both
+// fields are omitted: the API rejects a bad effort value outright, and a typo
+// should not sink an otherwise valid request.
+//
+// Effort alone is not enough to mean the same thing on every model. With no
+// thinking block at all, Opus 5 still reasons (it is on by default there) while
+// Opus 4.7 and 4.8 do not — so the identical request quietly changes meaning
+// with the model name. Asking for effort *is* a statement about reasoning
+// depth, so it comes paired with adaptive thinking and the model picks the
+// depth. Send no effort and the provider default is left alone.
+func effortConfig(s string) (effort, thinkingMode string) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "minimal", "low":
+		effort = "low"
+	case "medium":
+		effort = "medium"
+	case "high":
+		effort = "high"
+	case "xhigh":
+		effort = "xhigh"
+	case "max":
+		effort = "max"
+	default:
+		return "", ""
+	}
+	return effort, "adaptive"
+}
+
 func openaiToBlueship(req openaiChatRequest, defaultModel string) (bs.CompletionRequest, error) {
 	var systemParts []string
 	messages := make([]bs.Message, 0, len(req.Messages))
@@ -170,13 +207,17 @@ func openaiToBlueship(req openaiChatRequest, defaultModel string) (bs.Completion
 		maxTokens = 4096
 	}
 
+	effort, thinkingMode := effortConfig(req.ReasoningEffort)
+
 	return bs.CompletionRequest{
-		Model:       model,
-		System:      strings.Join(systemParts, "\n\n"),
-		Messages:    messages,
-		Tools:       tools,
-		MaxTokens:   maxTokens,
-		Temperature: req.Temperature,
+		Model:        model,
+		System:       strings.Join(systemParts, "\n\n"),
+		Messages:     messages,
+		Tools:        tools,
+		MaxTokens:    maxTokens,
+		Temperature:  req.Temperature,
+		Effort:       effort,
+		ThinkingMode: thinkingMode,
 	}, nil
 }
 

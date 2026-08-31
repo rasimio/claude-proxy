@@ -11,7 +11,7 @@ services:
       - "${BIND_ADDR:-0.0.0.0}:${HOST_PORT:-8080}:8080"
     environment:
       PROXY_API_KEY: ${PROXY_API_KEY:?set PROXY_API_KEY in .env}
-      DEFAULT_MODEL: ${DEFAULT_MODEL:-claude-sonnet-4-5-20250929}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-claude-opus-5}
       REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-300s}
       TOKEN_FILE: /data/anthropic-tokens.json
     volumes:
