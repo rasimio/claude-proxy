@@ -156,20 +156,31 @@ exactly which path the client built.
 
 ## Deploy
 
-Production: `ssh root@188.166.99.177`, code in `/opt/claude-proxy/`,
-managed by `docker compose`.
+Production: `ssh root@165.245.246.226`, code in `/opt/claude-proxy/`,
+managed by `docker compose`. Moved here from 188.166.99.177 on 2026-09-01.
+
+Never run both hosts against the same Claude account at once. The refresh
+token is single-use, so the second one to rotate kills the first's chain for
+good — see **Token rotation**. Each host gets its own `claude-proxy login`.
 
 ```bash
 # update
-ssh root@188.166.99.177 'cd /opt/claude-proxy && git pull && \
+ssh root@165.245.246.226 'cd /opt/claude-proxy && git pull && \
   docker compose build && docker compose up -d'
 
 # logs
-ssh root@188.166.99.177 'cd /opt/claude-proxy && docker compose logs -f claude-proxy'
+ssh root@165.245.246.226 'cd /opt/claude-proxy && docker compose logs -f claude-proxy'
 
 # health from outside
-curl -s http://188.166.99.177:8080/healthz   # process up?
-curl -s http://188.166.99.177:8080/readyz    # OAuth pair still good?
+curl -s http://165.245.246.226:8080/healthz   # process up?
+curl -s http://165.245.246.226:8080/readyz    # OAuth pair still good?
+```
+
+`login` needs a TTY — it prints a URL, you sign in, you paste the code back:
+
+```bash
+ssh -t root@165.245.246.226 'cd /opt/claude-proxy && \
+  docker compose run --rm claude-proxy login && docker compose up -d'
 ```
 
 CI is not set up. Push to main + ssh + rebuild is the workflow. Set up GH
